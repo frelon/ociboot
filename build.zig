@@ -1,70 +1,55 @@
 const std = @import("std");
+const Builder = @import("std").build.Builder;
+const Target = @import("std").Target;
+const CrossTarget = @import("std").zig.CrossTarget;
+const builtin = @import("builtin");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
-pub fn build(b: *std.Build) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
+const allocator = std.heap.page_allocator;
+
+pub fn build(b: *Builder) !void {
+    const x64_exe = b.addExecutable(.{ .name = "bootx64", .root_source_file = .{ .path = "src/main.zig" }, .target = CrossTarget{
+        .cpu_arch = Target.Cpu.Arch.x86_64,
+        .os_tag = Target.Os.Tag.uefi,
+        .abi = Target.Abi.msvc,
+    } });
+    const x64_artifact = b.addInstallArtifact(x64_exe, .{});
+    x64_artifact.dest_sub_path = "efi/boot/bootx64.efi";
+    b.default_step.dependOn(&x64_artifact.step);
+
+    const aa64_exe = b.addExecutable(.{ .name = "bootaa64", .root_source_file = .{ .path = "src/main.zig" }, .target = CrossTarget{
+        .cpu_arch = Target.Cpu.Arch.aarch64,
+        .os_tag = Target.Os.Tag.uefi,
+        .abi = Target.Abi.msvc,
+    } });
+    const aa64_artifact = b.addInstallArtifact(aa64_exe, .{});
+    aa64_artifact.dest_sub_path = "efi/boot/bootaa64.efi";
+    b.default_step.dependOn(&aa64_artifact.step);
+
+    const docker_build_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "bootable:latest", "-f", "Dockerfile", "./" });
+
+    const docker_save_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "save", "bootable:latest", "-o" });
+    const images_file = docker_save_cmd.addOutputFileArg("images.tar");
+    docker_save_cmd.step.dependOn(&docker_build_cmd.step);
+
+    const install_images = b.addInstallFile(images_file, "bin/ociboot/images.tar");
+    install_images.step.dependOn(&docker_save_cmd.step);
+
+    const dir = install_images.dest_builder.getInstallPath(install_images.dir, "bin/ociboot");
+    const file = install_images.dest_builder.getInstallPath(install_images.dir, install_images.dest_rel_path);
+    const extract_images_cmd = b.addSystemCommand(&[_][]const u8{ "tar", "xf", file, "-C", dir });
+    extract_images_cmd.step.dependOn(&install_images.step);
+
     const target = b.standardTargetOptions(.{});
+    const qemu_prg = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "qemu-system-aarch64" else "qemu-system-x86_64";
+    const firmware = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "/usr/share/qemu/aavmf-aarch64-ms-code.bin" else "/usr/share/qemu/ovmf-x86_64-ms.bin";
+    const machine = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "virt" else "pc";
 
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
-    const optimize = b.standardOptimizeOption(.{});
+    const qemu_cmd = b.addSystemCommand(&[_][]const u8{ qemu_prg, "-nographic", "-machine", machine, "-bios", firmware, "-nographic", "-drive", "format=raw,file=fat:rw:./zig-out/bin" });
 
-    const exe = b.addExecutable(.{
-        .name = "ociboot",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
+    qemu_cmd.step.dependOn(&x64_artifact.step);
+    qemu_cmd.step.dependOn(&aa64_artifact.step);
+    qemu_cmd.step.dependOn(&extract_images_cmd.step);
 
-    // This declares intent for the executable to be installed into the
-    // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
-    b.installArtifact(exe);
-
-    // This *creates* a Run step in the build graph, to be executed when another
-    // step is evaluated that depends on it. The next line below will establish
-    // such a dependency.
-    const run_cmd = b.addRunArtifact(exe);
-
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
-    // files, this ensures they will be present and in the expected location.
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    // This creates a build step. It will be visible in the `zig build --help` menu,
-    // and can be selected like this: `zig build run`
-    // This will evaluate the `run` step rather than the default, which is "install".
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_unit_tests = b.addRunArtifact(unit_tests);
-
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    const run_step = b.step("run", "Runs a QEMU virtual machine with the built bootloader");
+    run_step.dependOn(&qemu_cmd.step);
 }
