@@ -20,11 +20,11 @@ pub fn efi_main() !uefi.Status {
     pool_alloc_state = std.heap.ArenaAllocator.init(uefi.pool_allocator);
     pool_alloc = pool_alloc_state.allocator();
 
-    console.print("Welcome to the container bootloader.\r\n");
+    try console.print("Welcome to the container bootloader.\r\n");
 
     const boot_services = uefi.system_table.boot_services.?;
 
-    defer _ = boot_services.stall(60 * 1000 * 1000);
+    defer _ = boot_services.stall(10 * 1000 * 1000);
 
     var handles = blk: {
         var handle_ptr: [*]uefi.Handle = undefined;
@@ -44,22 +44,34 @@ pub fn efi_main() !uefi.Status {
 
     for (handles) |handle| {
         var fs = try boot_services.openProtocolSt(proto.SimpleFileSystem, handle);
-        // var device = try boot_services.openProtocolSt(proto.DevicePathProtocol, handle);
         var fp: *const proto.File = undefined;
         try fs.openVolume(&fp).err();
 
-        // var buf_reader = std.io.bufferedReader(fp.reader());
-        // var in_stream = buf_reader.reader();
+        var conf_name = try std.mem.concat(
+            pool_alloc,
+            u16,
+            &[_][]const u16{
+                utf16str("ociboot\\repositories"),
+                &[_]u16{0},
+            },
+        );
+        defer pool_alloc.free(conf_name);
 
-        // var buf: [1024]u8 = undefined;
-        // while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
-        // _ = line;
-        // // do something with line...
-        // }
+        var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
+        try console.print16(conf_sentinel.ptr);
 
+        var efp: *proto.File = undefined;
+        fp.open(&efp, conf_sentinel, proto.File.efi_file_mode_read, 0).err() catch |e| {
+            try console.print("ERROR");
+            return e;
+        };
+
+        var repos = try efp.reader().readAllAlloc(pool_alloc, 1024 * 1024);
+
+        try console.printf("{s}", .{repos});
     }
 
-    console.printf("Found {} handles", .{handles.len});
+    try console.printf("Found {} handles", .{handles.len});
 
     return uefi.Status.Success;
 }

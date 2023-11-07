@@ -1,26 +1,33 @@
 const uefi = @import("std").os.uefi;
 const fmt = @import("std").fmt;
+const unicode = @import("std").unicode;
 
 // EFI uses UCS-2 encoded null-terminated strings. UCS-2 encodes
 // code points in exactly 16 bit. Unlike UTF-16, it does not support all
 // Unicode code points.
 // We need to print each character in an [_]u8 individually because EFI
 // encodes strings as UCS-2.
-pub fn print(msg: []const u8) void {
+pub fn print(comptime msg: []const u8) !void {
     const con_out = uefi.system_table.con_out.?;
-    for (msg) |c| {
-        const c_ = [2]u16{ c, 0 }; // work around https://github.com/ziglang/zig/issues/4372
-        _ = con_out.outputString(@ptrCast(&c_));
-    }
+    const status = con_out.outputString(unicode.utf8ToUtf16LeStringLiteral(msg));
+    return status.err();
 }
 
-// For use with formatting strings
-var printf_buf: [100]u8 = undefined;
-
-pub fn printf(comptime format: []const u8, args: anytype) void {
-    buf_printf(printf_buf[0..], format, args);
+pub fn print16(msg: [*:0]const u16) !void {
+    const con_out = uefi.system_table.con_out.?;
+    return con_out.outputString(msg).err();
 }
 
-pub fn buf_printf(buf: []u8, comptime format: []const u8, args: anytype) void {
-    print(fmt.bufPrint(buf, format, args) catch unreachable);
+pub fn printf(comptime format: []const u8, args: anytype) !void {
+    const con_out = uefi.system_table.con_out.?;
+
+    var utf16: [2048:0]u16 = undefined;
+    var format_buf: [2048]u8 = undefined;
+
+    var slice = try fmt.bufPrint(&format_buf, format, args);
+    var length = try unicode.utf8ToUtf16Le(&utf16, slice);
+
+    utf16[length] = 0;
+
+    return con_out.outputString(&utf16).err();
 }
