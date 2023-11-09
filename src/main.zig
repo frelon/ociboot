@@ -3,6 +3,8 @@ const proto = @import("std").os.uefi.protocol;
 const std = @import("std");
 const console = @import("./console.zig");
 
+const ArrayList = std.ArrayList;
+
 const utf16str = std.unicode.utf8ToUtf16LeStringLiteral;
 
 const Allocator = std.mem.Allocator;
@@ -42,6 +44,9 @@ pub fn efi_main() !uefi.Status {
     };
     defer uefi.raw_pool_allocator.free(handles);
 
+    var manifests = ArrayList(Manifest).init(pool_alloc);
+    defer manifests.deinit();
+
     for (handles) |handle| {
         var fs = try boot_services.openProtocolSt(proto.SimpleFileSystem, handle);
         var fp: *const proto.File = undefined;
@@ -51,14 +56,13 @@ pub fn efi_main() !uefi.Status {
             pool_alloc,
             u16,
             &[_][]const u16{
-                utf16str("ociboot\\repositories"),
+                utf16str("ociboot\\manifest.json"),
                 &[_]u16{0},
             },
         );
         defer pool_alloc.free(conf_name);
 
         var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
-        try console.print16(conf_sentinel.ptr);
 
         var efp: *proto.File = undefined;
         fp.open(&efp, conf_sentinel, proto.File.efi_file_mode_read, 0).err() catch |e| {
@@ -66,15 +70,28 @@ pub fn efi_main() !uefi.Status {
             return e;
         };
 
-        var repos = try efp.reader().readAllAlloc(pool_alloc, 1024 * 1024);
+        const json = try efp.reader().readAllAlloc(pool_alloc, 1024 * 1024);
+        defer pool_alloc.free(json);
 
-        try console.printf("{s}", .{repos});
+        const parsed = try std.json.parseFromSlice(
+            []Manifest,
+            pool_alloc,
+            json,
+            .{ .ignore_unknown_fields = true },
+        );
+
+        for (parsed.value) |manifest| {
+            try console.printf("Appending manifest {s}\n", .{manifest.Config});
+            try manifests.append(manifest);
+        }
     }
 
-    try console.printf("Found {} handles", .{handles.len});
+    try console.printf("Found {} manifests\n", .{manifests.items.len});
 
     return uefi.Status.Success;
 }
+
+const Manifest = struct { Config: []u8 };
 
 fn load(handle: uefi.Handle, file_name: [:0]const u16, options: [:0]u16) !void {
     const boot_services = uefi.system_table.boot_services.?;
