@@ -2,11 +2,6 @@ const uefi = @import("std").os.uefi;
 const fmt = @import("std").fmt;
 const unicode = @import("std").unicode;
 
-// EFI uses UCS-2 encoded null-terminated strings. UCS-2 encodes
-// code points in exactly 16 bit. Unlike UTF-16, it does not support all
-// Unicode code points.
-// We need to print each character in an [_]u8 individually because EFI
-// encodes strings as UCS-2.
 pub fn print(comptime msg: []const u8) !void {
     const con_out = uefi.system_table.con_out.?;
     const status = con_out.outputString(unicode.utf8ToUtf16LeStringLiteral(msg));

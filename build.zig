@@ -25,9 +25,9 @@ pub fn build(b: *Builder) !void {
     aa64_artifact.dest_sub_path = "efi/boot/bootaa64.efi";
     b.default_step.dependOn(&aa64_artifact.step);
 
-    const docker_build_tw_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "bootable:latest", "-t", "recovery:latest", "-f", "Dockerfile.tw", "./" });
+    const docker_build_tw_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "--load", "-t", "bootable:latest", "-t", "recovery:latest", "-f", "Dockerfile.tw", "./" });
 
-    const docker_build_leap_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "leap:15.5", "-f", "Dockerfile.leap", "./" });
+    const docker_build_leap_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "--load", "-t", "leap:15.5", "-f", "Dockerfile.leap", "./" });
 
     const docker_save_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "save", "bootable:latest", "recovery:latest", "leap:15.5", "-o" });
     const images_file = docker_save_cmd.addOutputFileArg("images.tar");
@@ -47,7 +47,7 @@ pub fn build(b: *Builder) !void {
     const firmware = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "/usr/share/qemu/aavmf-aarch64-ms-code.bin" else "/usr/share/qemu/ovmf-x86_64-ms.bin";
     const machine = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "virt" else "pc";
 
-    const qemu_cmd = b.addSystemCommand(&[_][]const u8{ qemu_prg, "-nographic", "-machine", machine, "-bios", firmware, "-nographic", "-drive", "format=raw,file=fat:rw:./zig-out/bin" });
+    const qemu_cmd = b.addSystemCommand(&[_][]const u8{ qemu_prg, "-nographic", "-machine", machine, "-bios", firmware, "-m", "2G", "-nographic", "-drive", "format=raw,file=fat:rw:./zig-out/bin" });
 
     qemu_cmd.step.dependOn(&x64_artifact.step);
     qemu_cmd.step.dependOn(&aa64_artifact.step);
