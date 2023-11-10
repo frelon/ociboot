@@ -51,68 +51,78 @@ pub fn efi_main() !uefi.Status {
         var fp: *const proto.File = undefined;
         try fs.openVolume(&fp).err();
 
-        var conf_name = try std.mem.concat(
-            pool_alloc,
-            u16,
-            &[_][]const u16{
-                utf16str("ociboot\\manifest.json"),
-                &[_]u16{0},
-            },
-        );
+        var conf_name = try std.mem.concatWithSentinel(pool_alloc, u16, &[_][]const u16{
+            utf16str("ociboot\\manifest.json"),
+            &[_]u16{0},
+        }, 0);
         defer pool_alloc.free(conf_name);
 
-        var conf_sentinel = conf_name[0 .. conf_name.len - 1 :0];
-
         var efp: *proto.File = undefined;
-        fp.open(&efp, conf_sentinel, proto.File.efi_file_mode_read, 0).err() catch |e| {
-            try console.print("ERROR");
+        fp.open(&efp, conf_name, proto.File.efi_file_mode_read, 0).err() catch |e| {
+            try console.print("Error opening manifest.json");
             return e;
         };
 
-        // const json = try efp.reader().readAllAlloc(pool_alloc, 1024 * 1024);
-        // defer pool_alloc.free(json);
+        const json = try efp.reader().readAllAlloc(pool_alloc, 1024 * 1024);
+        defer pool_alloc.free(json);
 
-        // const parsed = try std.json.parseFromSlice(
-        //     []Manifest,
+        const parsed = try std.json.parseFromSlice(
+            []Manifest,
+            pool_alloc,
+            json,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer parsed.deinit();
+
+        for (parsed.value) |manifest| {
+            try console.printf("Appending manifest {s}\n", .{manifest.RepoTags});
+            try manifests.append(manifest);
+
+            // try the boot!
+            var layer = manifest.Layers[0];
+            _ = layer;
+
+            // var tar_name = try std.mem.concatWithSentinel(pool_alloc, u16, &[_][]const u16{
+            //     utf16str("ociboot\\"),
+            //     layer,
+            //     &[_]u16{0},
+            // }, 0);
+            // defer pool_alloc.free(tar_name);
+
+            // var tar_fp: *proto.File = undefined;
+            // fp.open(&tar_fp, tar_name, proto.File.efi_file_mode_read, 0).err() catch |e| {
+            //     try console.print("Error opening layer");
+            //     return e;
+            // };
+        }
+        //
+        //
+        // var file_name = try std.mem.concat(
         //     pool_alloc,
-        //     json,
-        //     .{ .ignore_unknown_fields = true },
+        //     u16,
+        //     &[_][]const u16{
+        //         utf16str("ociboot\\boot\\vmlinuz"),
+        //         &[_]u16{0},
+        //     },
         // );
-        // defer parsed.deinit();
+        // defer pool_alloc.free(file_name);
 
-        // for (parsed.value) |manifest| {
-        //     try console.printf("Appending manifest {s}\n", .{manifest.RepoTags});
-        //     try manifests.append(manifest);
-        // }
-        //
-        //
-        var file_name = try std.mem.concat(
-            pool_alloc,
-            u16,
-            &[_][]const u16{
-                utf16str("ociboot\\boot\\vmlinuz"),
-                &[_]u16{0},
-            },
-        );
-        defer pool_alloc.free(file_name);
+        // var args = try std.mem.concat(
+        //     pool_alloc,
+        //     u16,
+        //     &[_][]const u16{
+        //         utf16str("root=testitest console=ttyS0"),
+        //         &[_]u16{0},
+        //     },
+        // );
+        // defer pool_alloc.free(args);
 
-        var args = try std.mem.concat(
-            pool_alloc,
-            u16,
-            &[_][]const u16{
-                utf16str("root=/dev/ram0"),
-                utf16str(" init=/bin/bash"),
-                &[_]u16{0},
-            },
-        );
-        defer pool_alloc.free(args);
+        // var file_sentinel = file_name[0 .. file_name.len - 1 :0];
+        // var args_sentinel = args[0 .. args.len - 1 :0];
 
-        var file_sentinel = file_name[0 .. file_name.len - 1 :0];
-        var args_sentinel = args[0 .. args.len - 1 :0];
-
-        boot(handle, file_sentinel, args_sentinel) catch |err| {
-            try console.printf("ERROR LOADING: {}", .{err});
-        };
+        // boot(handle, file_sentinel, args_sentinel) catch |err| {
+        //     try console.printf("ERROR LOADING: {}", .{err});
+        // };
     }
 
     try console.printf("Found {} manifests\n", .{manifests.items.len});
@@ -127,24 +137,24 @@ fn boot(handle: uefi.Handle, file_name: [:0]const u16, options: [:0]u16) !void {
 
     var device = try boot_services.openProtocolSt(proto.DevicePath, handle);
 
-    try console.printf("Found device", .{});
+    try console.printf("Found device\n", .{});
 
     var img: ?uefi.Handle = undefined;
 
     var image_path = try file_path(pool_alloc, device, file_name);
 
-    try console.printf("Found image_path", .{});
+    try console.printf("Found image_path\n", .{});
 
     try boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img).err();
 
-    try console.printf("Loaded image", .{});
+    try console.printf("Loaded image\n", .{});
 
     var img_proto = try boot_services.openProtocolSt(proto.LoadedImage, img.?);
 
     img_proto.load_options = options.ptr;
     img_proto.load_options_size = @as(u32, @intCast((options.len + 1) * @sizeOf(u16)));
 
-    try console.printf("Starting image...", .{});
+    try console.printf("Starting image...\n", .{});
 
     try boot_services.startImage(img.?, null, null).err();
 }
@@ -170,7 +180,7 @@ fn file_path(
 
     var ptr: [*:0]u16 = @alignCast(@ptrCast(@as([*]u8, @ptrCast(new_dpp)) + @sizeOf(FilePathDevicePath)));
 
-    for (path, 0..) |s, i|
+    for (0.., path) |i, s|
         ptr[i] = s;
 
     ptr[path.len] = 0;
