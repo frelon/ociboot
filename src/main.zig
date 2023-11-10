@@ -16,16 +16,13 @@ pub fn main() void {
 }
 
 pub fn efi_main() !uefi.Status {
-    const con_out = uefi.system_table.con_out.?;
-    _ = con_out.reset(false);
-
     pool_alloc_state = std.heap.ArenaAllocator.init(uefi.pool_allocator);
     pool_alloc = pool_alloc_state.allocator();
 
+    try console.reset();
     try console.print("Welcome to the container bootloader.\r\n");
 
     const boot_services = uefi.system_table.boot_services.?;
-
     defer _ = boot_services.stall(10 * 1000 * 1000);
 
     var handles = blk: {
@@ -79,9 +76,10 @@ pub fn efi_main() !uefi.Status {
             json,
             .{ .ignore_unknown_fields = true },
         );
+        defer parsed.deinit();
 
         for (parsed.value) |manifest| {
-            try console.printf("Appending manifest {s}\n", .{manifest.Config});
+            try console.printf("Appending manifest {s}\n", .{manifest.RepoTags});
             try manifests.append(manifest);
         }
     }
@@ -91,7 +89,7 @@ pub fn efi_main() !uefi.Status {
     return uefi.Status.Success;
 }
 
-const Manifest = struct { Config: []u8 };
+const Manifest = struct { Config: []u8, RepoTags: [][]u8, Layers: [][]u8 };
 
 fn load(handle: uefi.Handle, file_name: [:0]const u16, options: [:0]u16) !void {
     const boot_services = uefi.system_table.boot_services.?;

@@ -31,3 +31,8 @@ pub fn printf(comptime format: []const u8, args: anytype) !void {
 
     return con_out.outputString(&utf16).err();
 }
+
+pub fn reset() !void {
+    const con_out = uefi.system_table.con_out.?;
+    return con_out.reset(false).err();
+}

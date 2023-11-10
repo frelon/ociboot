@@ -25,11 +25,14 @@ pub fn build(b: *Builder) !void {
     aa64_artifact.dest_sub_path = "efi/boot/bootaa64.efi";
     b.default_step.dependOn(&aa64_artifact.step);
 
-    const docker_build_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "bootable:latest", "-t", "recovery:latest", "-f", "Dockerfile", "./" });
+    const docker_build_tw_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "bootable:latest", "-t", "recovery:latest", "-f", "Dockerfile.tw", "./" });
 
-    const docker_save_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "save", "bootable:latest", "recovery:latest", "-o" });
+    const docker_build_leap_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "build", "--quiet", "-t", "leap:15.5", "-f", "Dockerfile.leap", "./" });
+
+    const docker_save_cmd = b.addSystemCommand(&[_][]const u8{ "docker", "save", "bootable:latest", "recovery:latest", "leap:15.5", "-o" });
     const images_file = docker_save_cmd.addOutputFileArg("images.tar");
-    docker_save_cmd.step.dependOn(&docker_build_cmd.step);
+    docker_save_cmd.step.dependOn(&docker_build_tw_cmd.step);
+    docker_save_cmd.step.dependOn(&docker_build_leap_cmd.step);
 
     const install_images = b.addInstallFile(images_file, "bin/ociboot/images.tar");
     install_images.step.dependOn(&docker_save_cmd.step);
