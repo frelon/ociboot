@@ -1,4 +1,6 @@
 const std = @import("std");
+const tar = @import("./tar.zig");
+
 const uefi = std.os.uefi;
 const proto = std.os.uefi.protocol;
 const ArrayList = std.ArrayList;
@@ -8,10 +10,15 @@ const EndEntireDevicePath = std.os.uefi.DevicePath.End.EndEntireDevicePath;
 const console = @import("./console.zig");
 
 const utf16str = std.unicode.utf8ToUtf16LeStringLiteral;
+const utf16le = std.unicode.utf8ToUtf16LeWithNull;
 
 const Allocator = std.mem.Allocator;
 var pool_alloc_state: std.heap.ArenaAllocator = undefined;
 var pool_alloc: Allocator = undefined;
+
+const MAX_PATH_BYTES = 64;
+
+const Manifest = struct { Config: []u8, RepoTags: [][]u8, Layers: [][]u8 };
 
 pub fn main() void {
     _ = efi_main() catch unreachable;
@@ -79,127 +86,63 @@ pub fn efi_main() !uefi.Status {
             try manifests.append(manifest);
 
             // try the boot!
-            var layer = manifest.Layers[0];
-            _ = layer;
+            const layer = manifest.Layers[0];
+            _ = std.mem.replace(u8, layer, "/", "\\", layer);
 
-            // var tar_name = try std.mem.concatWithSentinel(pool_alloc, u16, &[_][]const u16{
-            //     utf16str("ociboot\\"),
-            //     layer,
-            //     &[_]u16{0},
-            // }, 0);
-            // defer pool_alloc.free(tar_name);
+            const utf16layer = try utf16le(pool_alloc, layer);
+            try console.printf("Opening layer {s}\n", .{layer});
 
-            // var tar_fp: *proto.File = undefined;
-            // fp.open(&tar_fp, tar_name, proto.File.efi_file_mode_read, 0).err() catch |e| {
-            //     try console.print("Error opening layer");
-            //     return e;
-            // };
+            var tar_name = try std.mem.concatWithSentinel(pool_alloc, u16, &[_][]const u16{
+                utf16str("ociboot\\"),
+                utf16layer,
+                &[_]u16{0},
+            }, 0);
+            defer pool_alloc.free(tar_name);
+
+            var tar_fp: *proto.File = undefined;
+            fp.open(&tar_fp, tar_name, proto.File.efi_file_mode_read, 0).err() catch |e| {
+                try console.print("Error opening layer");
+                return e;
+            };
+
+            const fileinfo = try tar.stat(tar_fp.reader(), "boot/vmlinuz", MAX_PATH_BYTES);
+            try console.print("TEST1\n");
+            try console.printf("Found kernel: {s} sized {any}", .{ fileinfo.fileName, fileinfo.size });
+            try console.print("TEST2\n");
+
+            var kernel: [*]align(8) u8 = undefined;
+            try uefi.system_table.boot_services.?.allocatePool(uefi.efi_pool_memory_type, 10 * 1000 * 1000, &kernel).err();
+            const size = try tar.readFile(tar_fp.reader(), "boot/vmlinuz", MAX_PATH_BYTES, kernel);
+
+            try console.printf("Read kernel size {}", .{size});
+
+            var args = try std.mem.concat(
+                pool_alloc,
+                u16,
+                &[_][]const u16{
+                    utf16str("root=testitest console=ttyS0"),
+                    &[_]u16{0},
+                },
+            );
+            defer pool_alloc.free(args);
+
+            var img: ?uefi.Handle = undefined;
+            try boot_services.loadImage(false, uefi.handle, null, kernel, size, &img).err();
+
+            try console.printf("Loaded image\n", .{});
+
+            var img_proto = try boot_services.openProtocolSt(proto.LoadedImage, img.?);
+
+            img_proto.load_options = args.ptr;
+            img_proto.load_options_size = @as(u32, @intCast((args.len + 1) * @sizeOf(u16)));
+
+            try console.printf("Starting image...\n", .{});
+
+            try boot_services.startImage(img.?, null, null).err();
         }
-        //
-        //
-        // var file_name = try std.mem.concat(
-        //     pool_alloc,
-        //     u16,
-        //     &[_][]const u16{
-        //         utf16str("ociboot\\boot\\vmlinuz"),
-        //         &[_]u16{0},
-        //     },
-        // );
-        // defer pool_alloc.free(file_name);
-
-        // var args = try std.mem.concat(
-        //     pool_alloc,
-        //     u16,
-        //     &[_][]const u16{
-        //         utf16str("root=testitest console=ttyS0"),
-        //         &[_]u16{0},
-        //     },
-        // );
-        // defer pool_alloc.free(args);
-
-        // var file_sentinel = file_name[0 .. file_name.len - 1 :0];
-        // var args_sentinel = args[0 .. args.len - 1 :0];
-
-        // boot(handle, file_sentinel, args_sentinel) catch |err| {
-        //     try console.printf("ERROR LOADING: {}", .{err});
-        // };
     }
 
     try console.printf("Found {} manifests\n", .{manifests.items.len});
 
     return uefi.Status.Success;
-}
-
-const Manifest = struct { Config: []u8, RepoTags: [][]u8, Layers: [][]u8 };
-
-fn boot(handle: uefi.Handle, file_name: [:0]const u16, options: [:0]u16) !void {
-    const boot_services = uefi.system_table.boot_services.?;
-
-    var device = try boot_services.openProtocolSt(proto.DevicePath, handle);
-
-    try console.printf("Found device\n", .{});
-
-    var img: ?uefi.Handle = undefined;
-
-    var image_path = try file_path(pool_alloc, device, file_name);
-
-    try console.printf("Found image_path\n", .{});
-
-    try boot_services.loadImage(false, uefi.handle, image_path, null, 0, &img).err();
-
-    try console.printf("Loaded image\n", .{});
-
-    var img_proto = try boot_services.openProtocolSt(proto.LoadedImage, img.?);
-
-    img_proto.load_options = options.ptr;
-    img_proto.load_options_size = @as(u32, @intCast((options.len + 1) * @sizeOf(u16)));
-
-    try console.printf("Starting image...\n", .{});
-
-    try boot_services.startImage(img.?, null, null).err();
-}
-
-fn file_path(
-    alloc: std.mem.Allocator,
-    dpp: *proto.DevicePath,
-    path: [:0]const u16,
-) !*proto.DevicePath {
-    var size = dpp_size(dpp);
-
-    // u16 of path + null terminator -> 2 * (path.len + 1)
-    var buf = try alloc.alloc(u8, size + 2 * (path.len + 1) + @sizeOf(proto.DevicePath));
-
-    std.mem.copy(u8, buf, @as([*]u8, @ptrCast(dpp))[0..size]);
-
-    // Pointer to the start of the protocol, which is - 4 as the size includes the node length field.
-    var new_dpp = @as(*FilePathDevicePath, @ptrCast(buf.ptr + size - 4));
-
-    new_dpp.type = .Media;
-    new_dpp.subtype = .FilePath;
-    new_dpp.length = @sizeOf(FilePathDevicePath) + 2 * (@as(u16, @intCast(path.len)) + 1);
-
-    var ptr: [*:0]u16 = @alignCast(@ptrCast(@as([*]u8, @ptrCast(new_dpp)) + @sizeOf(FilePathDevicePath)));
-
-    for (0.., path) |i, s|
-        ptr[i] = s;
-
-    ptr[path.len] = 0;
-
-    var next = @as(*EndEntireDevicePath, @ptrCast(@as([*]u8, @ptrCast(new_dpp)) + new_dpp.length));
-    next.type = .End;
-    next.subtype = .EndEntire;
-    next.length = @sizeOf(EndEntireDevicePath);
-
-    return @as(*proto.DevicePath, @ptrCast(buf.ptr));
-}
-
-fn dpp_size(dpp: *proto.DevicePath) usize {
-    var start = dpp;
-
-    var node = dpp;
-    while (node.type != .End) {
-        node = @ptrFromInt(@intFromPtr(node) + node.length);
-    }
-
-    return (@intFromPtr(node) + node.length) - @intFromPtr(start);
 }

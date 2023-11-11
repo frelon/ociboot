@@ -44,7 +44,7 @@ pub fn build(b: *Builder) !void {
     const firmware = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "/usr/share/qemu/aavmf-aarch64-ms-code.bin" else "/usr/share/qemu/ovmf-x86_64-ms.bin";
     const machine = if (target.cpu_arch == Target.Cpu.Arch.aarch64) "virt" else "pc";
 
-    const qemu_cmd = b.addSystemCommand(&[_][]const u8{ qemu_prg, "-nographic", "-machine", machine, "-bios", firmware, "-m", "2G", "-nographic", "-drive", "format=raw,file=fat:rw:./zig-out/bin" });
+    const qemu_cmd = b.addSystemCommand(&[_][]const u8{ qemu_prg, "-machine", machine, "-bios", firmware, "-m", "2G", "-nographic", "-drive", "format=raw,file=fat:rw:./zig-out/bin" });
 
     qemu_cmd.step.dependOn(&x64_artifact.step);
     qemu_cmd.step.dependOn(&aa64_artifact.step);
