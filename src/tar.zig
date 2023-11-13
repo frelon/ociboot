@@ -2,6 +2,8 @@ const std = @import("std");
 const console = @import("./console.zig");
 const assert = std.debug.assert;
 
+const maxPathBytes = 100;
+
 pub const Header = struct {
     bytes: *const [512]u8,
 
@@ -36,8 +38,21 @@ pub const Header = struct {
     /// Return value may point into Header buffer, or might point into the
     /// argument buffer.
     /// TODO: check against "../" and other nefarious things
-    pub fn fullFileName(header: Header, buffer: *[64]u8) ![]const u8 {
+    pub fn fullFileName(header: Header, buffer: *[maxPathBytes]u8) ![]const u8 {
         const n = name(header);
+        if (!is_ustar(header))
+            return n;
+        const p = prefix(header);
+        if (p.len == 0)
+            return n;
+        @memcpy(buffer[0..p.len], p);
+        buffer[p.len] = '/';
+        @memcpy(buffer[p.len + 1 ..][0..n.len], n);
+        return buffer[0 .. p.len + 1 + n.len];
+    }
+
+    pub fn fullLinkName(header: Header, buffer: *[maxPathBytes]u8) ![]const u8 {
+        const n = linkName(header);
         if (!is_ustar(header))
             return n;
         const p = prefix(header);
@@ -115,18 +130,23 @@ const Buffer = struct {
 };
 
 const FileInfo = struct {
-    fileName: []u8,
+    file_name: *[maxPathBytes]u8,
+    len: usize,
     size: u64,
+
+    pub fn filename(self: FileInfo) []const u8 {
+        return self.file_name[0..self.len];
+    }
 };
 
-pub fn stat(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8) !FileInfo {
+pub fn stat(reader: anytype, fileName: []const u8) !?FileInfo {
     var file_name_buffer: [maxPathBytes]u8 = undefined;
-    var file_name_override_len: usize = 0;
+    var link_name_buffer: [maxPathBytes]u8 = undefined;
     var buffer: Buffer = .{};
     header: while (true) {
         const chunk = try buffer.readChunk(reader, 1024);
         switch (chunk.len) {
-            0 => return FileInfo{ .fileName = "", .size = 0 },
+            0 => return null,
             1...511 => return error.UnexpectedEndOfStream,
             else => {},
         }
@@ -136,25 +156,25 @@ pub fn stat(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8) !F
         const file_size = try header.fileSize();
         const rounded_file_size = std.mem.alignForward(u64, file_size, 512);
         const pad_len: usize = @intCast(rounded_file_size - file_size);
-        const unstripped_file_name = if (file_name_override_len > 0)
-            file_name_buffer[0..file_name_override_len]
-        else
-            try header.fullFileName(&file_name_buffer);
-        file_name_override_len = 0;
+        const unstripped_file_name = try header.fullFileName(&file_name_buffer);
         switch (header.fileType()) {
             .directory => {
                 buffer.skip(reader, @intCast(rounded_file_size)) catch return error.TarHeadersTooBig;
                 continue :header;
             },
             .normal => {
-                if (file_size == 0 and unstripped_file_name.len == 0) return FileInfo{ .fileName = "", .size = 0 };
+                if (file_size == 0 and unstripped_file_name.len == 0) return null;
 
                 if (std.mem.eql(u8, fileName, unstripped_file_name)) {
-                    try console.printf("FOUND {s}", .{fileName});
-                    return FileInfo{
-                        .fileName = undefined,
+                    try console.printf("Found {s}\n", .{fileName});
+                    const link = header.name();
+                    var ret = FileInfo{
+                        .file_name = undefined,
+                        .len = link.len,
                         .size = file_size,
                     };
+                    @memcpy(ret.file_name[0..link.len], link);
+                    return ret;
                 }
 
                 var file_off: usize = 0;
@@ -162,7 +182,6 @@ pub fn stat(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8) !F
                     const temp = try buffer.readChunk(reader, @intCast(rounded_file_size + 512 - file_off));
                     if (temp.len == 0) return error.UnexpectedEndOfStream;
                     const slice = temp[0..@intCast(@min(file_size - file_off, temp.len))];
-                    // if (file) |f| try f.writeAll(slice);
 
                     file_off += slice.len;
                     buffer.advance(slice.len);
@@ -174,13 +193,14 @@ pub fn stat(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8) !F
             },
             .symbolic_link => {
                 if (std.mem.eql(u8, fileName, unstripped_file_name)) {
-                    try console.printf("FOUND symlink {s} to {s}", .{ fileName, header.linkName() });
-                    const link = header.linkName();
+                    const link_name = try header.fullLinkName(&link_name_buffer);
+                    try console.printf("Found symlink {s} to {s}\n", .{ unstripped_file_name, link_name });
                     var ret = FileInfo{
-                        .fileName = undefined, // std.mem.zeroes([maxPathBytes]u8);
+                        .file_name = undefined,
+                        .len = link_name.len,
                         .size = file_size,
                     };
-                    @memcpy(ret.fileName, link);
+                    @memcpy(ret.file_name[0..link_name.len], link_name);
                     return ret;
                 }
             },
@@ -189,15 +209,12 @@ pub fn stat(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8) !F
             },
         }
     }
-
-    return FileInfo{};
 }
 
-pub fn readFile(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8, output: [*]u8) !usize {
-    _ = output;
+pub fn readFile(reader: anytype, fileName: []const u8, output: [*]u8) !usize {
     var file_name_buffer: [maxPathBytes]u8 = undefined;
-    var file_name_override_len: usize = 0;
     var buffer: Buffer = .{};
+    var headernum: u32 = 0;
     header: while (true) {
         const chunk = try buffer.readChunk(reader, 1024);
         switch (chunk.len) {
@@ -207,15 +224,13 @@ pub fn readFile(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8
         }
         buffer.advance(512);
 
+        headernum += 1;
+
         const header: Header = .{ .bytes = chunk[0..512] };
         const file_size = try header.fileSize();
         const rounded_file_size = std.mem.alignForward(u64, file_size, 512);
         const pad_len: usize = @intCast(rounded_file_size - file_size);
-        const unstripped_file_name = if (file_name_override_len > 0)
-            file_name_buffer[0..file_name_override_len]
-        else
-            try header.fullFileName(&file_name_buffer);
-        file_name_override_len = 0;
+        const unstripped_file_name = try header.fullFileName(&file_name_buffer);
         switch (header.fileType()) {
             .directory => {
                 buffer.skip(reader, @intCast(rounded_file_size)) catch return error.TarHeadersTooBig;
@@ -224,16 +239,22 @@ pub fn readFile(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8
             .normal => {
                 if (file_size == 0 and unstripped_file_name.len == 0) return 0;
 
-                if (std.mem.eql(u8, fileName, unstripped_file_name)) {
-                    try console.printf("FOUND {s}", .{fileName});
+                if (std.mem.endsWith(u8, unstripped_file_name, fileName)) {
+                    try console.printf("Reading file {s}\n", .{unstripped_file_name});
+                } else {
+                    try console.printf("Skipping file {s}\n", .{unstripped_file_name});
                 }
 
                 var file_off: usize = 0;
                 while (true) {
                     const temp = try buffer.readChunk(reader, @intCast(rounded_file_size + 512 - file_off));
                     if (temp.len == 0) return error.UnexpectedEndOfStream;
-                    const slice = temp[0..@intCast(@min(file_size - file_off, temp.len))];
-                    // if (file) |f| try f.writeAll(slice);
+                    const len: usize = @intCast(@min(file_size - file_off, temp.len));
+                    const slice = temp[0..len];
+
+                    if (std.mem.endsWith(u8, unstripped_file_name, fileName)) {
+                        @memcpy(output[file_off .. file_off + len], slice);
+                    }
 
                     file_off += slice.len;
                     buffer.advance(slice.len);
@@ -241,6 +262,8 @@ pub fn readFile(reader: anytype, fileName: []const u8, comptime maxPathBytes: u8
                         buffer.advance(pad_len);
                         continue :header;
                     }
+
+                    return file_size;
                 }
             },
             else => |file_type| {

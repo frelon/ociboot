@@ -13,10 +13,6 @@ const utf16str = std.unicode.utf8ToUtf16LeStringLiteral;
 const utf16le = std.unicode.utf8ToUtf16LeWithNull;
 
 const Allocator = std.mem.Allocator;
-var pool_alloc_state: std.heap.ArenaAllocator = undefined;
-var pool_alloc: Allocator = undefined;
-
-const MAX_PATH_BYTES = 64;
 
 const Manifest = struct { Config: []u8, RepoTags: [][]u8, Layers: [][]u8 };
 
@@ -25,8 +21,8 @@ pub fn main() void {
 }
 
 pub fn efi_main() !uefi.Status {
-    pool_alloc_state = std.heap.ArenaAllocator.init(uefi.pool_allocator);
-    pool_alloc = pool_alloc_state.allocator();
+    var pool_alloc_state: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(uefi.pool_allocator);
+    var pool_alloc = pool_alloc_state.allocator();
 
     try console.reset();
     try console.print("Welcome to the container bootloader.\r\n");
@@ -105,16 +101,18 @@ pub fn efi_main() !uefi.Status {
                 return e;
             };
 
-            const fileinfo = try tar.stat(tar_fp.reader(), "boot/vmlinuz", MAX_PATH_BYTES);
-            try console.print("TEST1\n");
-            try console.printf("Found kernel: {s} sized {any}", .{ fileinfo.fileName, fileinfo.size });
-            try console.print("TEST2\n");
+            const fileinfo = try tar.stat(tar_fp.reader(), "boot/vmlinuz");
+            try console.printf("Found kernel: {s}\n", .{fileinfo.?.filename()});
+
+            try tar_fp.setPosition(0).err();
 
             var kernel: [*]align(8) u8 = undefined;
-            try uefi.system_table.boot_services.?.allocatePool(uefi.efi_pool_memory_type, 10 * 1000 * 1000, &kernel).err();
-            const size = try tar.readFile(tar_fp.reader(), "boot/vmlinuz", MAX_PATH_BYTES, kernel);
+            const const_size = 100 * 1000 * 1000;
+            try uefi.system_table.boot_services.?.allocatePool(uefi.efi_pool_memory_type, const_size, &kernel).err();
+            defer uefi.system_table.boot_services.?.freePool(kernel).err() catch {};
+            const size = try tar.readFile(tar_fp.reader(), fileinfo.?.filename(), kernel);
 
-            try console.printf("Read kernel size {}", .{size});
+            try console.printf("Kernel size {}\n", .{size});
 
             var args = try std.mem.concat(
                 pool_alloc,
@@ -127,7 +125,7 @@ pub fn efi_main() !uefi.Status {
             defer pool_alloc.free(args);
 
             var img: ?uefi.Handle = undefined;
-            try boot_services.loadImage(false, uefi.handle, null, kernel, size, &img).err();
+            try boot_services.loadImage(false, uefi.handle, null, kernel, const_size, &img).err();
 
             try console.printf("Loaded image\n", .{});
 
