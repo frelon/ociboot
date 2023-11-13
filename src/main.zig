@@ -101,16 +101,18 @@ pub fn efi_main() !uefi.Status {
                 return e;
             };
 
-            const fileinfo = try tar.stat(tar_fp.reader(), "boot/vmlinuz");
-            try console.printf("Found kernel: {s}\n", .{fileinfo.?.filename()});
-
+            const link = try tar.stat(tar_fp.reader(), "boot/vmlinuz");
+            try console.printf("Found kernel symlink: {s}\n", .{link.?.filename()});
             try tar_fp.setPosition(0).err();
 
+            const fileinfo = try tar.stat(tar_fp.reader(), link.?.filename());
+            try console.printf("Found kernel: {s} with size {}\n", .{ fileinfo.?.filename(), fileinfo.?.size });
+            try tar_fp.setPosition(0).err();
+            const size = fileinfo.?.size;
             var kernel: [*]align(8) u8 = undefined;
-            const const_size = 100 * 1000 * 1000;
-            try uefi.system_table.boot_services.?.allocatePool(uefi.efi_pool_memory_type, const_size, &kernel).err();
+            try uefi.system_table.boot_services.?.allocatePool(uefi.efi_pool_memory_type, size, &kernel).err();
             defer uefi.system_table.boot_services.?.freePool(kernel).err() catch {};
-            const size = try tar.readFile(tar_fp.reader(), fileinfo.?.filename(), kernel);
+            _ = try tar.readFile(tar_fp.reader(), fileinfo.?.filename(), kernel);
 
             try console.printf("Kernel size {}\n", .{size});
 
@@ -118,14 +120,14 @@ pub fn efi_main() !uefi.Status {
                 pool_alloc,
                 u16,
                 &[_][]const u16{
-                    utf16str("root=testitest console=ttyS0"),
+                    utf16str("root=/dev/sda console=ttyS0"),
                     &[_]u16{0},
                 },
             );
             defer pool_alloc.free(args);
 
             var img: ?uefi.Handle = undefined;
-            try boot_services.loadImage(false, uefi.handle, null, kernel, const_size, &img).err();
+            try boot_services.loadImage(false, uefi.handle, null, kernel, size, &img).err();
 
             try console.printf("Loaded image\n", .{});
 
@@ -143,4 +145,37 @@ pub fn efi_main() !uefi.Status {
     try console.printf("Found {} manifests\n", .{manifests.items.len});
 
     return uefi.Status.Success;
+}
+
+pub fn create_memory_device_path(self: *proto.DevicePath, allocator: Allocator, path: [:0]align(1) const u16) !*proto.DevicePath {
+    var path_size = self.size();
+
+    // 2 * (path.len + 1) for the path and its null terminator, which are u16s
+    // DevicePath for the extra node before the end
+    var buf = try allocator.alloc(u8, path_size + 2 * (path.len + 1) + @sizeOf(proto.DevicePath));
+
+    @memcpy(buf[0..path_size], @as([*]const u8, @ptrCast(self))[0..path_size]);
+
+    // Pointer to the copy of the end node of the current chain, which is - 4 from the buffer
+    // as the end node itself is 4 bytes (type: u8 + subtype: u8 + length: u16).
+    var new = @as(*uefi.DevicePath.Hardware.MemoryMappedDevicePath, @ptrCast(buf.ptr + path_size - 4));
+
+    new.type = .Hardware;
+    new.subtype = .MemoryMapped;
+    new.length = @sizeOf(uefi.DevicePath.Hardware.MemoryMappedDevicePath) + 2 * (@as(u16, @intCast(path.len)) + 1);
+
+    // The same as new.getPath(), but not const as we're filling it in.
+    var ptr = @as([*:0]align(1) u16, @ptrCast(@as([*]u8, @ptrCast(new)) + @sizeOf(uefi.DevicePath.Hardware.MemoryMappedDevicePath)));
+
+    for (path, 0..) |s, i|
+        ptr[i] = s;
+
+    ptr[path.len] = 0;
+
+    var end = @as(*uefi.DevicePath.End.EndEntireDevicePath, @ptrCast(@as(*proto.DevicePath, @ptrCast(new)).next().?));
+    end.type = .End;
+    end.subtype = .EndEntire;
+    end.length = @sizeOf(uefi.DevicePath.End.EndEntireDevicePath);
+
+    return @as(*proto.DevicePath, @ptrCast(buf.ptr));
 }

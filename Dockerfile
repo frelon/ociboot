@@ -4,5 +4,4 @@ RUN zypper install -y kernel-default dracut systemd && \
     dracut --regenerate-all -f
 
 FROM scratch
-COPY --from=build /boot/vmlinu* /boot
-COPY --from=build /boot/init* /boot
+COPY --from=build /boot /boot

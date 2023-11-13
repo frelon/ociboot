@@ -165,15 +165,14 @@ pub fn stat(reader: anytype, fileName: []const u8) !?FileInfo {
             .normal => {
                 if (file_size == 0 and unstripped_file_name.len == 0) return null;
 
-                if (std.mem.eql(u8, fileName, unstripped_file_name)) {
-                    try console.printf("Found {s}\n", .{fileName});
-                    const link = header.name();
+                if (std.mem.endsWith(u8, unstripped_file_name, fileName)) {
+                    try console.printf("Found normal {s}\n", .{fileName});
                     var ret = FileInfo{
                         .file_name = undefined,
-                        .len = link.len,
+                        .len = unstripped_file_name.len,
                         .size = file_size,
                     };
-                    @memcpy(ret.file_name[0..link.len], link);
+                    @memcpy(ret.file_name[0..unstripped_file_name.len], unstripped_file_name);
                     return ret;
                 }
 
